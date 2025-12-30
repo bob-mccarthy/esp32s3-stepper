@@ -96,7 +96,7 @@ void IRAM_ATTR trigger_pulse(int channel_id){
 }
 
 volatile rmt_channel_handle_t motor_chan = NULL;
-rmt_encoder_handle_t uniform_motor_encoder = NULL;
+volatile rmt_channel_handle_t test_chan = NULL;
 
 
 float segment_length = 0.002;
@@ -202,6 +202,18 @@ void app_main() {
     };
     ESP_ERROR_CHECK(rmt_new_tx_channel(&tx_chan_config, (rmt_channel_handle_t*) &motor_chan));
 
+    rmt_tx_channel_config_t tx_chan_config_test = {
+        .clk_src = RMT_CLK_SRC_DEFAULT, // select clock source
+        .gpio_num = TEST_PIN,
+        .mem_block_symbols = 64,
+        .resolution_hz = STEPPER_MOTOR_RESOLUTION,
+        .trans_queue_depth = 1, // set the number of transactions that can be pending in the background
+        .intr_priority = 0,
+        .flags.invert_out = 0,
+        .flags.with_dma = 0
+    };
+    ESP_ERROR_CHECK(rmt_new_tx_channel(&tx_chan_config_test, (rmt_channel_handle_t*) &test_chan));
+
     // stepper_motor_uniform_encoder_config_t uniform_encoder_config = {
     //     .resolution = STEPPER_MOTOR_RESOLUTION,
     // };
@@ -210,6 +222,7 @@ void app_main() {
 
     ESP_LOGI(INIT_TAG, "Enable RMT channel");
     ESP_ERROR_CHECK(rmt_enable(motor_chan));
+    ESP_ERROR_CHECK(rmt_enable(test_chan));
     // char queue[24];
     gptimer_handle_t gptimer = NULL;
     gptimer_config_t timer_config = {
@@ -266,37 +279,52 @@ void app_main() {
     // }
     int channel_id = -1;
     ESP_ERROR_CHECK(rmt_get_channel_id(motor_chan, &channel_id));
+
+    int channel_id_test = -1;
+    ESP_ERROR_CHECK(rmt_get_channel_id(test_chan, &channel_id_test));
+
     hw->chnconf0[channel_id].mem_tx_wrap_en_chn = 0;
     hw->chnconf0[channel_id].carrier_en_chn = 0;
     hw->chnconf0[channel_id].div_cnt_chn = 80;
     hw->chnconf0[channel_id].conf_update_chn = 1;
 
+    hw->chnconf0[channel_id_test].mem_tx_wrap_en_chn = 0;
+    hw->chnconf0[channel_id_test].carrier_en_chn = 0;
+    hw->chnconf0[channel_id_test].div_cnt_chn = 80;
+    hw->chnconf0[channel_id_test].conf_update_chn = 1;
+
     volatile uint32_t *chan_mem_ptr = (uint32_t *)(DR_REG_RMT_BASE + 0x800 + (channel_id * 48 * 4));
     uint32_t pulse_us = 5;
     uint32_t symbol = (1 << 15) | (pulse_us);
-    rmt_symbol_word_t zero = {0,0,0,0};
     chan_mem_ptr[0] = symbol; // First data
     chan_mem_ptr[1] = 0;
     chan_mem_ptr[2] = 0;
     chan_mem_ptr[3] = 0;
+
+    volatile uint32_t *chan_mem_ptr_test = (uint32_t *)(DR_REG_RMT_BASE + 0x800 + (channel_id_test * 48 * 4));
+    chan_mem_ptr_test[0] = symbol; // First data
+    chan_mem_ptr_test[1] = 0;
+    chan_mem_ptr_test[2] = 0;
+    chan_mem_ptr_test[3] = 0;
     // 3. Ensure Wrap is DISABLED for raw manual pulses
     
 
 
-    gpio_set_level(TEST_PIN, 1);
+    // gpio_set_level(TEST_PIN, 1);
     // trigger_pulse(channel_id);
     for (int i = 0; i < 10; i++){
         trigger_pulse(channel_id);
+        trigger_pulse(channel_id_test);
         esp_rom_delay_us(8);
         // vTaskDelay(pdMS_TO_TICKS(2));
     }
-    gpio_set_level(TEST_PIN, 0);
+    // gpio_set_level(TEST_PIN, 0);
 
     
     
     while(1){
-        // ESP_LOGI("debug", "channel id %d rmt pointer %p", channel_id, RMT_CH0DATA_REG);
-        debug_rmt_registers(channel_id);
+        ESP_LOGI("debug", "channel id %d rmt pointer %p", channel_id_test, RMT_CH0DATA_REG);
+        // debug_rmt_registers(channel_id);
         // if(seg_queue->num_elements == BUFFER_SIZE){
         //     if (segments_created < acceleration_segments){
         //         generate_accel_segment(&p, step_buffer);
