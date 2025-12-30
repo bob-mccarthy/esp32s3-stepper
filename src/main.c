@@ -10,8 +10,59 @@
 #include "segment_queue.h"
 #include "segment_generation.h"
 #include "string.h"
+#include "esp_rom_sys.h"
+
+#include "hal/rmt_ll.h"
+#include "hal/rmt_hal.h"
+#include "soc/rmt_struct.h"
+#include "soc/rmt_reg.h"
+#include "driver/rmt_types.h"
+#include "hal/rmt_types.h"
+#include "esp_private/rmt.h"
 
 
+void debug_rmt_registers(int channel_id) {
+    // Access the global RMT register structure
+    rmt_dev_t *dev = &RMT;
+    static const char *TAG = "RMT_DEBUG";
+    ESP_LOGI(TAG, "--- RMT Channel %d Register Debug ---", channel_id);
+
+    // 1. Divider and Basic Config
+    uint32_t conf0 = dev->chnconf0[channel_id].val;
+    int div = dev->chnconf0[channel_id].div_cnt_chn;
+    int carrier_en = dev->chnconf0[channel_id].carrier_en_chn;
+    int wrap_en = dev->chnconf0[channel_id].mem_tx_wrap_en_chn;
+    
+    ESP_LOGI(TAG, "CONF0 (0x%08" PRIx32 "): Div=%d, Carrier=%d, Wrap=%d", 
+             conf0, div, carrier_en, wrap_en);
+
+    // 2. Carrier Settings 
+    uint32_t carrier_high = dev->chncarrier_duty[channel_id].carrier_high_chn;
+    uint32_t carrier_low = dev->chncarrier_duty[channel_id].carrier_low_chn;
+    ESP_LOGI(TAG, "Carrier Duty: High Ticks=%lu, Low Ticks=%lu", carrier_high, carrier_low);
+
+    // 3. Status and RAM Pointer
+    uint32_t status = dev->chnstatus[channel_id].val;
+    // On S3, bits 0-9 of status usually show the read pointer position
+    ESP_LOGI(TAG, "Status Register: 0x%08" PRIx32, status);
+    
+    // 4. Memory Base and Content
+    uint32_t mem_addr = DR_REG_RMT_BASE + 0x800 + (channel_id * 48 * 4);
+    uint32_t val0 = *(volatile uint32_t*)mem_addr;
+    uint32_t val1 = *(volatile uint32_t*)(mem_addr + 4);
+    
+    ESP_LOGI(TAG, "RAM Addr: 0x%08" PRIx32, mem_addr);
+    ESP_LOGI(TAG, "RAM[0]: 0x%08" PRIx32 " (Dur0=%u, Lvl0=%u, Dur1=%u, Lvl1=%u)", 
+             val0, (unsigned int)(val0 & 0x7FFF), (unsigned int)((val0 >> 15) & 1),
+             (unsigned int)((val0 >> 16) & 0x7FFF), (unsigned int)((val0 >> 31) & 1));
+    ESP_LOGI(TAG, "RAM[1]: 0x%08" PRIx32, val1);
+    
+    // 5. Global Config (Check for APB FIFO Access)
+    // If bit 0 is set, the CPU cannot write to RAM properly while the RMT is active
+    ESP_LOGI(TAG, "RMT_SYS_CONF: 0x%08" PRIx32, dev->sys_conf.val);
+    
+    ESP_LOGI(TAG, "--------------------------------------");
+}
 static const char *TAG = "STEPPER_MOTOR";
 
 #define DIR_PIN 11
@@ -22,11 +73,27 @@ static const char *TAG = "STEPPER_MOTOR";
 #define BUTTON_PIN 4
 
 #define STEPPER_MOTOR_RESOLUTION 1000000 // 1Mhz
+#define STEPPER_MOTOR_TICKS 2000
 const static uint32_t uniform_speed_hz = 100000;
+rmt_symbol_word_t freq_sample = {
+    .level0 = 1,
+    .duration0 = STEPPER_MOTOR_TICKS,
+    .level1 = 0,
+    .duration1 = 0,
+};
 
 volatile struct segment_queue *seg_queue = NULL;
 volatile struct segment_node *curr_segment = NULL; 
 bool refresh_next_segment_flag = false; 
+rmt_dev_t *hw = &RMT;
+
+void IRAM_ATTR trigger_pulse(int channel_id){
+    
+    hw->chnconf0[channel_id].mem_rd_rst_chn = 1;
+    hw->chnconf0[channel_id].mem_rd_rst_chn = 0;
+    // hw->chnconf0[channel_id].tx_stop_chn = 0;
+    hw->chnconf0[channel_id].tx_start_chn = 1;
+}
 
 volatile rmt_channel_handle_t motor_chan = NULL;
 rmt_encoder_handle_t uniform_motor_encoder = NULL;
@@ -36,7 +103,7 @@ float segment_length = 0.002;
 
 rmt_encoder_handle_t *encoder;
 rmt_transmit_config_t tx_config = {
-    .loop_count = 0,
+    .loop_count = 1,
 };
 
 typedef struct{
@@ -62,60 +129,6 @@ typedef struct {
     uint32_t resolution;
 } rmt_stepper_uniform_encoder_t;
 
-static size_t rmt_encode_stepper_motor_uniform(rmt_encoder_t *encoder, rmt_channel_handle_t channel, const void *primary_data, size_t data_size, rmt_encode_state_t *ret_state){
-    rmt_stepper_uniform_encoder_t *motor_encoder = __containerof(encoder, rmt_stepper_uniform_encoder_t, base);
-    rmt_encoder_handle_t copy_encoder = motor_encoder->copy_encoder;
-    rmt_encode_state_t session_state = RMT_ENCODING_RESET;
-    uint32_t target_freq_hz = *(uint32_t *)primary_data;
-    uint32_t symbol_duration = motor_encoder->resolution / target_freq_hz / 2;
-    rmt_symbol_word_t freq_sample = {
-        .level0 = 0,
-        .duration0 = symbol_duration,
-        .level1 = 1,
-        .duration1 = symbol_duration,
-    };
-    size_t encoded_symbols = copy_encoder->encode(copy_encoder, channel, &freq_sample, sizeof(freq_sample), &session_state);
-    *ret_state = session_state;
-    return encoded_symbols;
-}
-
-static esp_err_t rmt_del_stepper_motor_uniform_encoder(rmt_encoder_t *encoder){
-    rmt_stepper_uniform_encoder_t *motor_encoder = __containerof(encoder, rmt_stepper_uniform_encoder_t, base);
-    rmt_del_encoder(motor_encoder->copy_encoder);
-    free(motor_encoder);
-    return ESP_OK;
-}
-
-static esp_err_t rmt_reset_stepper_motor_uniform(rmt_encoder_t *encoder){
-    rmt_stepper_uniform_encoder_t *motor_encoder = __containerof(encoder, rmt_stepper_uniform_encoder_t, base);
-    rmt_encoder_reset(motor_encoder->copy_encoder);
-    return ESP_OK;
-}
-
-esp_err_t rmt_new_stepper_motor_uniform_encoder(const stepper_motor_uniform_encoder_config_t *cfg, rmt_encoder_handle_t *ret_encoder){
-    esp_err_t ret = ESP_OK;
-    rmt_stepper_uniform_encoder_t *step_encoder = NULL;
-    ESP_GOTO_ON_FALSE(cfg && ret_encoder, ESP_ERR_INVALID_ARG, err, TAG, "invalid arguments");
-    step_encoder = rmt_alloc_encoder_mem(sizeof(rmt_stepper_uniform_encoder_t));
-    ESP_GOTO_ON_FALSE(step_encoder, ESP_ERR_NO_MEM, err, TAG, "no mem for stepper uniform encoder");
-    rmt_copy_encoder_config_t copy_encoder_config = {};
-    ESP_GOTO_ON_ERROR(rmt_new_copy_encoder(&copy_encoder_config, &step_encoder->copy_encoder), err, TAG, "create copy encoder failed");
-
-    step_encoder->resolution = cfg->resolution;
-    step_encoder->base.del = rmt_del_stepper_motor_uniform_encoder;
-    step_encoder->base.encode = rmt_encode_stepper_motor_uniform;
-    step_encoder->base.reset = rmt_reset_stepper_motor_uniform;
-    *ret_encoder = &(step_encoder->base);
-    return ESP_OK;
-err:
-    if (step_encoder) {
-        if (step_encoder->copy_encoder) {
-            rmt_del_encoder(step_encoder->copy_encoder);
-        }
-        free(step_encoder);
-    }
-    return ret;
-}
 
 volatile bool led_state = false; 
 
@@ -182,15 +195,18 @@ void app_main() {
         .gpio_num = STEP_PIN,
         .mem_block_symbols = 64,
         .resolution_hz = STEPPER_MOTOR_RESOLUTION,
-        .trans_queue_depth = 10, // set the number of transactions that can be pending in the background
+        .trans_queue_depth = 1, // set the number of transactions that can be pending in the background
+        .intr_priority = 0,
+        .flags.invert_out = 0,
+        .flags.with_dma = 0
     };
     ESP_ERROR_CHECK(rmt_new_tx_channel(&tx_chan_config, (rmt_channel_handle_t*) &motor_chan));
 
-    stepper_motor_uniform_encoder_config_t uniform_encoder_config = {
-        .resolution = STEPPER_MOTOR_RESOLUTION,
-    };
+    // stepper_motor_uniform_encoder_config_t uniform_encoder_config = {
+    //     .resolution = STEPPER_MOTOR_RESOLUTION,
+    // };
     
-    ESP_ERROR_CHECK(rmt_new_stepper_motor_uniform_encoder(&uniform_encoder_config, &uniform_motor_encoder));
+    // ESP_ERROR_CHECK(rmt_new_stepper_motor_uniform_encoder(&uniform_encoder_config, &uniform_motor_encoder));
 
     ESP_LOGI(INIT_TAG, "Enable RMT channel");
     ESP_ERROR_CHECK(rmt_enable(motor_chan));
@@ -242,30 +258,65 @@ void app_main() {
                acceleration_segments, constant_vel_segments, total_segments);
 
     int segments_created = 0;
-    for(int i = 0; i < 500; i++){
-        rmt_transmit(motor_chan, uniform_motor_encoder, &uniform_speed_hz, sizeof(uniform_speed_hz), &tx_config);
-    }
-    // while(1){
-    //     if(seg_queue->num_elements == BUFFER_SIZE){
-    //         if (segments_created < acceleration_segments){
-    //             generate_accel_segment(&p, step_buffer);
-    //         }
-    //         else if (segments_created < acceleration_segments + constant_vel_segments){
-    //             generate_uniform_segment(&p, step_buffer);
-    //         }
-    //         else if (segments_created < total_segments){
-    //             generate_decel_segment(&p, step_buffer);
-    //         }
-            
-    //         if(segments_created < total_segments){
-    //             add_segment(seg_queue, step_buffer);
-    //             segments_created++;
-    //         }
-            
-            
-    //     }
-    //     vTaskDelay(pdMS_TO_TICKS(1));
-
+    
+    // for(int i = 0; i < 10; i++){   
+    //     gpio_set_level(TEST_PIN, 1);
+    //     rmt_transmit(motor_chan, uniform_motor_encoder, &uniform_speed_hz, sizeof(uniform_speed_hz), &tx_config);
+    //     gpio_set_level(TEST_PIN, 0);
     // }
+    int channel_id = -1;
+    ESP_ERROR_CHECK(rmt_get_channel_id(motor_chan, &channel_id));
+    hw->chnconf0[channel_id].mem_tx_wrap_en_chn = 0;
+    hw->chnconf0[channel_id].carrier_en_chn = 0;
+    hw->chnconf0[channel_id].div_cnt_chn = 80;
+    hw->chnconf0[channel_id].conf_update_chn = 1;
+
+    volatile uint32_t *chan_mem_ptr = (uint32_t *)(DR_REG_RMT_BASE + 0x800 + (channel_id * 48 * 4));
+    uint32_t pulse_us = 5;
+    uint32_t symbol = (1 << 15) | (pulse_us);
+    rmt_symbol_word_t zero = {0,0,0,0};
+    chan_mem_ptr[0] = symbol; // First data
+    chan_mem_ptr[1] = 0;
+    chan_mem_ptr[2] = 0;
+    chan_mem_ptr[3] = 0;
+    // 3. Ensure Wrap is DISABLED for raw manual pulses
+    
+
+
+    gpio_set_level(TEST_PIN, 1);
+    // trigger_pulse(channel_id);
+    for (int i = 0; i < 10; i++){
+        trigger_pulse(channel_id);
+        esp_rom_delay_us(8);
+        // vTaskDelay(pdMS_TO_TICKS(2));
+    }
+    gpio_set_level(TEST_PIN, 0);
+
+    
+    
+    while(1){
+        // ESP_LOGI("debug", "channel id %d rmt pointer %p", channel_id, RMT_CH0DATA_REG);
+        debug_rmt_registers(channel_id);
+        // if(seg_queue->num_elements == BUFFER_SIZE){
+        //     if (segments_created < acceleration_segments){
+        //         generate_accel_segment(&p, step_buffer);
+        //     }
+        //     else if (segments_created < acceleration_segments + constant_vel_segments){
+        //         generate_uniform_segment(&p, step_buffer);
+        //     }
+        //     else if (segments_created < total_segments){
+        //         generate_decel_segment(&p, step_buffer);
+        //     }
+            
+        //     if(segments_created < total_segments){
+        //         add_segment(seg_queue, step_buffer);
+        //         segments_created++;
+        //     }
+            
+            
+        // }
+        vTaskDelay(pdMS_TO_TICKS(1000));
+
+    }
 
 }
