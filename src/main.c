@@ -73,14 +73,6 @@ static const char *TAG = "STEPPER_MOTOR";
 #define BUTTON_PIN 4
 
 #define STEPPER_MOTOR_RESOLUTION 1000000 // 1Mhz
-#define STEPPER_MOTOR_TICKS 2000
-const static uint32_t uniform_speed_hz = 100000;
-rmt_symbol_word_t freq_sample = {
-    .level0 = 1,
-    .duration0 = STEPPER_MOTOR_TICKS,
-    .level1 = 0,
-    .duration1 = 0,
-};
 
 volatile struct segment_queue *seg_queue = NULL;
 volatile struct segment_node *curr_segment = NULL; 
