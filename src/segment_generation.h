@@ -10,6 +10,6 @@ struct planning_data{
         float curr_dist[NUM_AXIS]; // therotical num of steps steps the stepper should have traveled (including fractions of steps)
         uint32_t steps_output[NUM_AXIS]; //number of steps sent to stepper motor
 };
-void generate_accel_segment(struct planning_data *p, uint32_t *steps_to_output);
-void generate_decel_segment(struct planning_data *p, uint32_t *steps_to_output);
-void generate_uniform_segment(struct planning_data *p, uint32_t *steps_to_output);
+int generate_accel_segment(struct planning_data *p, uint32_t *steps_to_output);
+int generate_decel_segment(struct planning_data *p, uint32_t *steps_to_output);
+int generate_uniform_segment(struct planning_data *p, uint32_t *steps_to_output);

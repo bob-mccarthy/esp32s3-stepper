@@ -1,4 +1,5 @@
 #include "segment_queue.h"
+#include "esp_log.h"
 
 
 void init_segment_queue(struct segment_queue *new_queue){
@@ -9,7 +10,7 @@ void init_segment_queue(struct segment_queue *new_queue){
 }
 
 
-uint8_t add_segment(struct segment_queue *seg_queue, uint32_t *steps){
+uint8_t add_segment(struct segment_queue *seg_queue, uint32_t *steps, int num_segments ){
     assert(seg_queue->num_elements != BUFFER_SIZE);
     struct segment_node *seg_node = &seg_queue->queue[seg_queue->tail];
     uint32_t max_steps = 0;
@@ -22,6 +23,8 @@ uint8_t add_segment(struct segment_queue *seg_queue, uint32_t *steps){
     }
     seg_node->max_steps = max_steps;
     seg_node->steps_left = max_steps;
+    seg_node->isrTicks = (2000 * num_segments)/max_steps; //2000 ticks per segment (if 1Mhz clock and .002 segment_len)
+    // ESP_LOGI("ADD_SEGMENT", "isrTicks %hu", seg_node->isrTicks);
 
     seg_queue->num_elements += 1;
     seg_queue->tail = (seg_queue->tail + 1) % BUFFER_SIZE; 
@@ -30,7 +33,7 @@ uint8_t add_segment(struct segment_queue *seg_queue, uint32_t *steps){
 }
 
 struct segment_node pop_segment(struct segment_queue *seg_queue){
-    assert(seg_queue->num_elements != 0);
+    // assert(seg_queue->num_elements != 0);
     struct segment_node popVal = seg_queue->queue[seg_queue->head];
     seg_queue->head = (seg_queue->head + 1) % BUFFER_SIZE;
     seg_queue->num_elements -= 1;

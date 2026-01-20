@@ -2,7 +2,7 @@
 #include "stdint.h"
 #include "stdlib.h"
 #define BUFFER_SIZE 200
-#define NUM_AXIS 2
+#define NUM_AXIS 1
 
 extern float segment_length;
 
@@ -11,6 +11,7 @@ struct segment_node{
     uint32_t counter[NUM_AXIS];
     uint32_t max_steps;
     uint32_t steps_left; // how many iterations of the loop do we have left
+    uint16_t isrTicks; //how many ticks between interrupts assuming 1 mhz clock
 };
 
 struct segment_queue{
@@ -21,6 +22,6 @@ struct segment_queue{
 };
 
 void init_segment_queue(struct segment_queue *new_queue);
-uint8_t add_segment(struct segment_queue *seg_queue, uint32_t *steps);
+uint8_t add_segment(struct segment_queue *seg_queue, uint32_t *steps, int num_segments);
 struct segment_node pop_segment(struct segment_queue *seg_queue);
 

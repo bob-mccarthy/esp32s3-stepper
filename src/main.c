@@ -75,10 +75,11 @@ static const char *TAG = "STEPPER_MOTOR";
 #define STEPPER_MOTOR_RESOLUTION 1000000 // 1Mhz
 
 volatile struct segment_queue *seg_queue = NULL;
-volatile struct segment_node *curr_segment = NULL; 
+volatile int segments_created = 0;
+struct segment_node *curr_segment = NULL; 
 bool refresh_next_segment_flag = false; 
 rmt_dev_t *hw = &RMT;
-
+volatile int rmt_channel_id = -1;
 void IRAM_ATTR trigger_pulse(int channel_id){
     
     hw->chnconf0[channel_id].mem_rd_rst_chn = 1;
@@ -120,35 +121,73 @@ typedef struct {
     rmt_encoder_handle_t copy_encoder;
     uint32_t resolution;
 } rmt_stepper_uniform_encoder_t;
+gptimer_alarm_config_t alarm_config_one = {
+    .reload_count = 0,      // When the alarm event occurs, the timer will automatically reload to 0
+    .alarm_count = 10, // Set the actual alarm period, since the resolution is 1us, 1000000 represents 1s
+    .flags.auto_reload_on_alarm = true, // Enable auto-reload function
+};
 
+gptimer_alarm_config_t alarm_config_two = {
+    .reload_count = 0,      // When the alarm event occurs, the timer will automatically reload to 0
+    .alarm_count = 50, // Set the actual alarm period, since the resolution is 1us, 1000000 represents 1s
+    .flags.auto_reload_on_alarm = true, // Enable auto-reload function
+};
 
-volatile bool led_state = false; 
+volatile bool alarm_state = false; 
 
-
+volatile uint8_t loop_count = 0;
+volatile int timerTicks = 2000;
 static bool pulse_interrupt(gptimer_handle_t timer, const gptimer_alarm_event_data_t *edata, void *user_ctx){
-    gpio_set_level(TEST_PIN, led_state);
-    led_state = !led_state;
-    
-    // if(seg_queue == NULL || (seg_queue->num_elements == 0 && curr_segment == NULL)){
-    //     return true;
+
+    gptimer_alarm_config_t alarm_config = {
+        .alarm_count = edata->alarm_value + timerTicks, // Next alarm in 1s from the current alarm
+    };
+    // Update the alarm value
+    int currTimerTicks = timerTicks;
+    gptimer_set_alarm_action(timer, &alarm_config);
+    // if(loop_count >= 10){
+    //     ESP_ERROR_CHECK(gptimer_set_alarm_action(timer, alarm_state ? &alarm_config_one : &alarm_config_two));
+    //     alarm_state = !alarm_state;
+    //     loop_count = 0;
     // }
-    // if(curr_segment->steps_left == 0 && seg_queue->num_elements != 0){
-    //     struct segment_node new_node = pop_segment((struct segment_queue *)seg_queue);
-    //     memcpy((struct segment_node *)curr_segment, &new_node, sizeof(curr_segment));
-    //     // curr_segment = seg_queue->num_elements; 
-     
+    // if(rmt_channel_id != -1){
+    //     trigger_pulse(rmt_channel_id);
     // }
-    // for(int i = 0; i < 1; i++){
-	// 	curr_segment->counter[i] += curr_segment->steps[i];
-	// 	if (curr_segment->counter[i] >= curr_segment->max_steps){
-	// 		// printf("Just stepped axis num :%d\n", i);
-            // rmt_transmit(motor_chan, uniform_motor_encoder, &uniform_speed_hz, sizeof(uniform_speed_hz), &tx_config);
-	// 		curr_segment->counter[i] -= curr_segment->max_steps;
-	// 	}
-	// }
+    // loop_count++;
+    
+    // ESP_LOGI("INTERRUPT", "Just over hear testing");
+    if(seg_queue == NULL || (seg_queue->num_elements == 0 && curr_segment->steps_left == 0)){
+        return true;
+    }
+
+    
+    if (curr_segment->steps_left > 0){
+        for(int i = 0; i < 1; i++){
+            curr_segment->counter[i] += curr_segment->steps[i];
+            if (curr_segment->counter[i] >= curr_segment->max_steps){
+                trigger_pulse(rmt_channel_id);
+                curr_segment->steps_left -= 1;
+                curr_segment->counter[i] -= curr_segment->max_steps;
+            }
+        }
+    }
+
+     if(curr_segment->steps_left == 0 && seg_queue->num_elements > 0){
+            struct segment_node new_node = pop_segment((struct segment_queue *)seg_queue);
+            if(new_node.isrTicks < 50){
+                return true;
+            }
+            memcpy(curr_segment, &new_node, sizeof(struct segment_node));
+            // ESP_LOGI("segment generation", "curr_segment with %lu steps left", curr_segment->steps_left);
+            // memcpy(&tmp_node, &new_node, sizeof(new_node));
+            // ESP_LOGI("segment generation", "curr_segment with %lu steps left", curr_segment->steps_left);
+            timerTicks = curr_segment->isrTicks;
+    }
+    
+
     
     
-    // ESP_ERROR_CHECK(rmt_transmit(motor_chan, uniform_motor_encoder, &uniform_speed_hz, sizeof(uniform_speed_hz), &tx_config));
+    
 }
 
 void app_main() {
@@ -215,6 +254,13 @@ void app_main() {
     ESP_LOGI(INIT_TAG, "Enable RMT channel");
     ESP_ERROR_CHECK(rmt_enable(motor_chan));
     ESP_ERROR_CHECK(rmt_enable(test_chan));
+
+    seg_queue = (struct segment_queue *) calloc(1, sizeof(struct segment_queue));
+    init_segment_queue((struct segment_queue *)seg_queue);
+
+    curr_segment = (struct segment_node*) calloc(1, sizeof(struct segment_node));
+    curr_segment->steps_left = 0;
+
     // char queue[24];
     gptimer_handle_t gptimer = NULL;
     gptimer_config_t timer_config = {
@@ -225,35 +271,33 @@ void app_main() {
     ESP_ERROR_CHECK(gptimer_new_timer(&timer_config, &gptimer));
     gptimer_alarm_config_t alarm_config = {
     .reload_count = 0, // counter will reload with 0 on alarm event
-    .alarm_count = 10,
-    .flags.auto_reload_on_alarm = true, // enable auto-reload
+    .alarm_count = 2000,
+    .flags.auto_reload_on_alarm = false, // enable auto-reload
     };
     ESP_ERROR_CHECK(gptimer_set_alarm_action(gptimer, &alarm_config));
 
     gptimer_event_callbacks_t cbf = {
         .on_alarm = pulse_interrupt,
     };
-    // ESP_ERROR_CHECK(gptimer_register_event_callbacks(gptimer, &cbf, NULL));
-    // ESP_ERROR_CHECK(gptimer_enable(gptimer));
-    // ESP_ERROR_CHECK(gptimer_start(gptimer));
-    struct segment_queue *seg_queue = (struct segment_queue *) malloc(sizeof(struct segment_queue));
-    init_segment_queue(seg_queue);
 
-    curr_segment = (struct segment_node*) malloc(sizeof(struct segment_node));
+
+   
+    
+
 
     struct planning_data p;
-    p.curr_accel[0] = 500;
-    p.curr_accel[1] = 130;
+    p.curr_accel[0] = 2000;
+    // p.curr_accel[1] = 1500;
     p.curr_vel[0] = 0;
-    p.curr_vel[1] = 0;
+    // p.curr_vel[1] = 0;
     p.curr_dist[0] = 0;
-    p.curr_dist[1] = 0;
+    // p.curr_dist[1] = 0;
     p.steps_output[0] = 0;
-    p.steps_output[1] = 0;
-    uint32_t step_buffer[2];
+    // p.steps_output[1] = 0;
+    uint32_t step_buffer[1];
 
-    const int acceleration_time = 1; // in seconds
-    const int constant_vel_time = 10;
+    const int acceleration_time = 2; // in seconds
+    const int constant_vel_time = 5;
     const int acceleration_segments = acceleration_time / segment_length;
     const int constant_vel_segments = constant_vel_time / segment_length;
     const int total_segments = acceleration_segments * 2 + constant_vel_segments;
@@ -262,7 +306,7 @@ void app_main() {
               "acceleration segments %d, constant_vel_segments %d, totalSegments %d", 
                acceleration_segments, constant_vel_segments, total_segments);
 
-    int segments_created = 0;
+   
     
     // for(int i = 0; i < 10; i++){   
     //     gpio_set_level(TEST_PIN, 1);
@@ -271,14 +315,14 @@ void app_main() {
     // }
     int channel_id = -1;
     ESP_ERROR_CHECK(rmt_get_channel_id(motor_chan, &channel_id));
-
+    rmt_channel_id = channel_id; 
     int channel_id_test = -1;
     ESP_ERROR_CHECK(rmt_get_channel_id(test_chan, &channel_id_test));
 
-    hw->chnconf0[channel_id].mem_tx_wrap_en_chn = 0;
-    hw->chnconf0[channel_id].carrier_en_chn = 0;
-    hw->chnconf0[channel_id].div_cnt_chn = 80;
-    hw->chnconf0[channel_id].conf_update_chn = 1;
+    hw->chnconf0[channel_id].mem_tx_wrap_en_chn = 0; //do not transmit after sending transmission
+    hw->chnconf0[channel_id].carrier_en_chn = 0; // do transform this into signal just turn the bits into raw high or low
+    hw->chnconf0[channel_id].div_cnt_chn = 80; // prescaler divide 80Mhz clk
+    hw->chnconf0[channel_id].conf_update_chn = 1; //latch the values from virtual register
 
     hw->chnconf0[channel_id_test].mem_tx_wrap_en_chn = 0;
     hw->chnconf0[channel_id_test].carrier_en_chn = 0;
@@ -298,45 +342,49 @@ void app_main() {
     chan_mem_ptr_test[1] = 0;
     chan_mem_ptr_test[2] = 0;
     chan_mem_ptr_test[3] = 0;
-    // 3. Ensure Wrap is DISABLED for raw manual pulses
-    
-
-
-    // gpio_set_level(TEST_PIN, 1);
-    // trigger_pulse(channel_id);
-    for (int i = 0; i < 10; i++){
-        trigger_pulse(channel_id);
-        trigger_pulse(channel_id_test);
-        esp_rom_delay_us(8);
-        // vTaskDelay(pdMS_TO_TICKS(2));
-    }
-    // gpio_set_level(TEST_PIN, 0);
 
     
     
+    ESP_ERROR_CHECK(gptimer_register_event_callbacks(gptimer, &cbf, NULL));
+    ESP_ERROR_CHECK(gptimer_enable(gptimer));
+    ESP_ERROR_CHECK(gptimer_start(gptimer));
+
     while(1){
-        ESP_LOGI("debug", "channel id %d rmt pointer %p", channel_id_test, RMT_CH0DATA_REG);
+        // ESP_LOGI("debug", "segment_queue len: %hu", seg_queue->num_elements);
+        
+        // ESP_LOGI("step debug", "curr_segment->steps_left%lu", curr_segment->steps_left);
+        // ESP_LOGI("debug", "channel id %d rmt pointer %p", channel_id_test, RMT_CH0DATA_REG);
         // debug_rmt_registers(channel_id);
-        // if(seg_queue->num_elements == BUFFER_SIZE){
-        //     if (segments_created < acceleration_segments){
-        //         generate_accel_segment(&p, step_buffer);
-        //     }
-        //     else if (segments_created < acceleration_segments + constant_vel_segments){
-        //         generate_uniform_segment(&p, step_buffer);
-        //     }
-        //     else if (segments_created < total_segments){
-        //         generate_decel_segment(&p, step_buffer);
-        //     }
+        // esp_rom_delay_us(1000000);
+        if (segments_created %10 == 0 || segments_created == total_segments){
+            vTaskDelay(1);
+            // ESP_LOGI("debug", "segments created: %d", segments_created);
+        }
+        if (segments_created % 1000 == 0){
+            // vTaskDelay(1);
+            ESP_LOGI("debug", "segments created: %d", segments_created);
+        }
+        if(seg_queue->num_elements < BUFFER_SIZE){
+            int num_segments = 0;
+            if (segments_created < acceleration_segments){
+                num_segments = generate_accel_segment(&p, step_buffer);
+            }
+            else if (segments_created < acceleration_segments + constant_vel_segments){
+                num_segments = generate_uniform_segment(&p, step_buffer);
+            }
+            else if (segments_created < total_segments){
+                num_segments = generate_decel_segment(&p, step_buffer);
+            }
             
-        //     if(segments_created < total_segments){
-        //         add_segment(seg_queue, step_buffer);
-        //         segments_created++;
-        //     }
+            if(segments_created < total_segments){
+                add_segment((struct segment_queue *)seg_queue, step_buffer, num_segments);
+                segments_created += num_segments;
+            }
             
-            
-        // }
-        vTaskDelay(pdMS_TO_TICKS(1000));
-
+        }
+        
+        
     }
+    
 
 }
