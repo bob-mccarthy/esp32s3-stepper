@@ -296,15 +296,13 @@ void app_main() {
     // p.steps_output[1] = 0;
     uint32_t step_buffer[1];
 
-    const int acceleration_time = 2; // in seconds
+    const int acceleration_time = 6; // in seconds
     const int constant_vel_time = 5;
-    const int acceleration_segments = acceleration_time / segment_length;
+    const int acceleration_segments = (acceleration_time / segment_length);
     const int constant_vel_segments = constant_vel_time / segment_length;
     const int total_segments = acceleration_segments * 2 + constant_vel_segments;
 
-    ESP_LOGI("segment generation", 
-              "acceleration segments %d, constant_vel_segments %d, totalSegments %d", 
-               acceleration_segments, constant_vel_segments, total_segments);
+    
 
    
     
@@ -344,26 +342,25 @@ void app_main() {
     chan_mem_ptr_test[3] = 0;
 
     
-    
+    vTaskDelay(pdMS_TO_TICKS(2000));
     ESP_ERROR_CHECK(gptimer_register_event_callbacks(gptimer, &cbf, NULL));
     ESP_ERROR_CHECK(gptimer_enable(gptimer));
     ESP_ERROR_CHECK(gptimer_start(gptimer));
-
+    
+    ESP_LOGI("step debug", "planning current velocity%f", p.curr_vel[0]);
+    ESP_LOGI("step debug", "p->curr_accel[0] * (.002 * 6) %f", p.curr_accel[0] * 0.002 * 6);
     while(1){
         // ESP_LOGI("debug", "segment_queue len: %hu", seg_queue->num_elements);
         
-        // ESP_LOGI("step debug", "curr_segment->steps_left%lu", curr_segment->steps_left);
+        
         // ESP_LOGI("debug", "channel id %d rmt pointer %p", channel_id_test, RMT_CH0DATA_REG);
         // debug_rmt_registers(channel_id);
         // esp_rom_delay_us(1000000);
-        if (segments_created %10 == 0 || segments_created == total_segments){
+        if (segments_created %10 == 0 || segments_created >= total_segments){
             vTaskDelay(1);
             // ESP_LOGI("debug", "segments created: %d", segments_created);
         }
-        if (segments_created % 1000 == 0){
-            // vTaskDelay(1);
-            ESP_LOGI("debug", "segments created: %d", segments_created);
-        }
+        
         if(seg_queue->num_elements < BUFFER_SIZE){
             int num_segments = 0;
             if (segments_created < acceleration_segments){
@@ -371,6 +368,7 @@ void app_main() {
             }
             else if (segments_created < acceleration_segments + constant_vel_segments){
                 num_segments = generate_uniform_segment(&p, step_buffer);
+                
             }
             else if (segments_created < total_segments){
                 num_segments = generate_decel_segment(&p, step_buffer);
@@ -379,7 +377,13 @@ void app_main() {
             if(segments_created < total_segments){
                 add_segment((struct segment_queue *)seg_queue, step_buffer, num_segments);
                 segments_created += num_segments;
+                // if (segments_created <100){
+                //     ESP_LOGI("step debug", "planning current velocity%f", p.curr_vel[0]);
+                //     // vTaskDelay(1);
+                //     ESP_LOGI("debug", "segments created: %d", segments_created);
+                // }
             }
+
             
         }
         

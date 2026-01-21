@@ -23,7 +23,7 @@ uint8_t add_segment(struct segment_queue *seg_queue, uint32_t *steps, int num_se
     }
     seg_node->max_steps = max_steps;
     seg_node->steps_left = max_steps;
-    seg_node->isrTicks = (2000 * num_segments)/max_steps; //2000 ticks per segment (if 1Mhz clock and .002 segment_len)
+    seg_node->isrTicks = (2000 * num_segments) / max_steps; //2000 ticks per segment (if 1Mhz clock and .002 segment_len)
     // ESP_LOGI("ADD_SEGMENT", "isrTicks %hu", seg_node->isrTicks);
 
     seg_queue->num_elements += 1;
